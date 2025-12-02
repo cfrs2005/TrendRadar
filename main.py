@@ -4335,7 +4335,7 @@ def send_to_bark(
     proxy_url: Optional[str] = None,
     mode: str = "daily",
 ) -> bool:
-    """发送到Bark（支持分批发送，使用 markdown 格式）"""
+    """发送到Bark（支持分批发送，使用增强的 markdown 格式和去重功能）"""
     proxies = None
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
@@ -4354,24 +4354,54 @@ def send_to_bark(
     # 构建正确的 API 端点
     api_endpoint = f"{parsed_url.scheme}://{parsed_url.netloc}/push"
 
-    # 获取分批内容（Bark 限制为 3600 字节以避免 413 错误），预留批次头部空间
-    bark_batch_size = CONFIG["BARK_BATCH_SIZE"]
-    header_reserve = _get_max_batch_header_size("bark")
-    batches = split_content_into_batches(
-        report_data, "bark", update_info, max_bytes=bark_batch_size - header_reserve, mode=mode
-    )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "bark", bark_batch_size)
+    # 使用增强的格式化器（包含去重和优化格式）
+    try:
+        from enhanced_bark_formatter import EnhancedBarkFormatter
+        formatter = EnhancedBarkFormatter(enable_duplicate_detection=True)
+        
+        print("🤖 启用Bark增强功能：智能去重 + 优化格式")
+        now = datetime.now()
+        batches = formatter.format_enhanced_message(report_data, now, update_info)
+        
+        # 输出去重统计信息
+        duplicate_stats = formatter.get_duplicate_stats()
+        if duplicate_stats and duplicate_stats["total_duplicates"] > 0:
+            print(f"🎯 智能去重完成: 处理 {duplicate_stats['total_processed']} 条，"
+                  f"去除 {duplicate_stats['total_duplicates']} 条重复，"
+                  f"保留 {duplicate_stats['unique_content']} 条")
+            
+            # 输出平台去重详情
+            if duplicate_stats["platform_duplicates"]:
+                platform_details = []
+                for platform, count in duplicate_stats["platform_duplicates"].items():
+                    platform_details.append(f"{platform}({count})")
+                print(f"📱 平台重复: {'/'.join(platform_details)}")
+            
+            if duplicate_stats["cross_platform_duplicates"] > 0:
+                print(f"🔄 跨平台重复: {duplicate_stats['cross_platform_duplicates']} 条")
+            
+            print(f"🔍 检测方式: 哈希匹配 {duplicate_stats['hash_based_duplicates']} 条，"
+                  f"相似度匹配 {duplicate_stats['similarity_based_duplicates']} 条")
+        
+    except ImportError:
+        print("⚠️ 增强格式化器不可用，使用传统格式")
+        # 回退到传统格式
+        bark_batch_size = CONFIG["BARK_BATCH_SIZE"]
+        header_reserve = _get_max_batch_header_size("bark")
+        batches = split_content_into_batches(
+            report_data, "bark", update_info, max_bytes=bark_batch_size - header_reserve, mode=mode
+        )
+        # 统一添加批次头部（已预留空间，不会超限）
+        batches = add_batch_headers(batches, "bark", bark_batch_size)
 
     total_batches = len(batches)
-    print(f"Bark消息分为 {total_batches} 批次发送 [{report_type}]")
+    print(f"📦 Bark消息分为 {total_batches} 批次发送 [{report_type}]")
 
     # 反转批次顺序，使得在Bark客户端显示时顺序正确
     # Bark显示最新消息在上面，所以我们从最后一批开始推送
     reversed_batches = list(reversed(batches))
 
-    print(f"Bark将按反向顺序推送（最后批次先推送），确保客户端显示顺序正确")
+    print(f"📱 Bark将按反向顺序推送（最后批次先推送），确保客户端显示顺序正确")
 
     # 逐批发送（反向顺序）
     success_count = 0
