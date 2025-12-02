@@ -19,6 +19,11 @@ import pytz
 import requests
 import yaml
 
+# 导入AI增强服务
+from ai_enhanced_service import AIEnhancedService
+from ai_message_formatter import format_message_with_ai_enhancement, prepare_enhanced_content_for_platform
+from enhanced_message_generator import generate_enhanced_message_content
+
 
 VERSION = "3.4.1"
 
@@ -3565,6 +3570,16 @@ def send_to_notifications(
 
     report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
 
+    # AI增强处理：智能去重和分类总结
+    ai_service = AIEnhancedService()
+    ai_enabled = ai_service.is_enabled()
+    
+    if ai_enabled:
+        print("🤖 启用AI智能增强功能...")
+        enhanced_report_data = format_message_with_ai_enhancement(report_data, mode, enable_ai=True)
+    else:
+        enhanced_report_data = report_data
+    
     feishu_url = CONFIG["FEISHU_WEBHOOK_URL"]
     dingtalk_url = CONFIG["DINGTALK_WEBHOOK_URL"]
     wework_url = CONFIG["WEWORK_WEBHOOK_URL"]
@@ -3586,19 +3601,19 @@ def send_to_notifications(
     # 发送到飞书
     if feishu_url:
         results["feishu"] = send_to_feishu(
-            feishu_url, report_data, report_type, update_info_to_send, proxy_url, mode
+            feishu_url, enhanced_report_data, report_type, update_info_to_send, proxy_url, mode
         )
 
     # 发送到钉钉
     if dingtalk_url:
         results["dingtalk"] = send_to_dingtalk(
-            dingtalk_url, report_data, report_type, update_info_to_send, proxy_url, mode
+            dingtalk_url, enhanced_report_data, report_type, update_info_to_send, proxy_url, mode
         )
 
     # 发送到企业微信
     if wework_url:
         results["wework"] = send_to_wework(
-            wework_url, report_data, report_type, update_info_to_send, proxy_url, mode
+            wework_url, enhanced_report_data, report_type, update_info_to_send, proxy_url, mode
         )
 
     # 发送到 Telegram
@@ -3606,7 +3621,7 @@ def send_to_notifications(
         results["telegram"] = send_to_telegram(
             telegram_token,
             telegram_chat_id,
-            report_data,
+            enhanced_report_data,
             report_type,
             update_info_to_send,
             proxy_url,
@@ -3619,7 +3634,7 @@ def send_to_notifications(
             ntfy_server_url,
             ntfy_topic,
             ntfy_token,
-            report_data,
+            enhanced_report_data,
             report_type,
             update_info_to_send,
             proxy_url,
@@ -3630,7 +3645,7 @@ def send_to_notifications(
     if bark_url:
         results["bark"] = send_to_bark(
             bark_url,
-            report_data,
+            enhanced_report_data,
             report_type,
             update_info_to_send,
             proxy_url,
@@ -3641,7 +3656,7 @@ def send_to_notifications(
     if slack_webhook_url:
         results["slack"] = send_to_slack(
             slack_webhook_url,
-            report_data,
+            enhanced_report_data,
             report_type,
             update_info_to_send,
             proxy_url,
@@ -3689,20 +3704,14 @@ def send_to_feishu(
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
 
-    # 获取分批内容，使用飞书专用的批次大小
-    feishu_batch_size = CONFIG.get("FEISHU_BATCH_SIZE", 29000)
-    # 预留批次头部空间，避免添加头部后超限
-    header_reserve = _get_max_batch_header_size("feishu")
-    batches = split_content_into_batches(
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
         report_data,
         "feishu",
-        update_info,
-        max_bytes=feishu_batch_size - header_reserve,
-        mode=mode,
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "feishu", feishu_batch_size)
 
     print(f"飞书消息分为 {len(batches)} 批次发送 [{report_type}]")
 
@@ -3773,20 +3782,14 @@ def send_to_dingtalk(
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
 
-    # 获取分批内容，使用钉钉专用的批次大小
-    dingtalk_batch_size = CONFIG.get("DINGTALK_BATCH_SIZE", 20000)
-    # 预留批次头部空间，避免添加头部后超限
-    header_reserve = _get_max_batch_header_size("dingtalk")
-    batches = split_content_into_batches(
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
         report_data,
         "dingtalk",
-        update_info,
-        max_bytes=dingtalk_batch_size - header_reserve,
-        mode=mode,
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "dingtalk", dingtalk_batch_size)
 
     print(f"钉钉消息分为 {len(batches)} 批次发送 [{report_type}]")
 
@@ -3904,15 +3907,14 @@ def send_to_wework(
     # text 模式使用 wework_text，markdown 模式使用 wework
     header_format_type = "wework_text" if is_text_mode else "wework"
 
-    # 获取分批内容，预留批次头部空间
-    wework_batch_size = CONFIG.get("MESSAGE_BATCH_SIZE", 4000)
-    header_reserve = _get_max_batch_header_size(header_format_type)
-    batches = split_content_into_batches(
-        report_data, "wework", update_info, max_bytes=wework_batch_size - header_reserve, mode=mode
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
+        report_data,
+        "wework",
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, header_format_type, wework_batch_size)
 
     print(f"企业微信消息分为 {len(batches)} 批次发送 [{report_type}]")
 
@@ -3979,15 +3981,14 @@ def send_to_telegram(
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
 
-    # 获取分批内容，预留批次头部空间
-    telegram_batch_size = CONFIG.get("MESSAGE_BATCH_SIZE", 4000)
-    header_reserve = _get_max_batch_header_size("telegram")
-    batches = split_content_into_batches(
-        report_data, "telegram", update_info, max_bytes=telegram_batch_size - header_reserve, mode=mode
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
+        report_data,
+        "telegram",
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "telegram", telegram_batch_size)
 
     print(f"Telegram消息分为 {len(batches)} 批次发送 [{report_type}]")
 
@@ -4216,15 +4217,14 @@ def send_to_ntfy(
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
 
-    # 获取分批内容，使用ntfy专用的4KB限制，预留批次头部空间
-    ntfy_batch_size = 3800
-    header_reserve = _get_max_batch_header_size("ntfy")
-    batches = split_content_into_batches(
-        report_data, "ntfy", update_info, max_bytes=ntfy_batch_size - header_reserve, mode=mode
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
+        report_data,
+        "ntfy",
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "ntfy", ntfy_batch_size)
 
     total_batches = len(batches)
     print(f"ntfy消息分为 {total_batches} 批次发送 [{report_type}]")
@@ -4355,14 +4355,14 @@ def send_to_bark(
     api_endpoint = f"{parsed_url.scheme}://{parsed_url.netloc}/push"
 
     # 获取分批内容（Bark 限制为 3600 字节以避免 413 错误），预留批次头部空间
-    bark_batch_size = CONFIG["BARK_BATCH_SIZE"]
-    header_reserve = _get_max_batch_header_size("bark")
-    batches = split_content_into_batches(
-        report_data, "bark", update_info, max_bytes=bark_batch_size - header_reserve, mode=mode
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
+        report_data,
+        "bark",
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "bark", bark_batch_size)
 
     total_batches = len(batches)
     print(f"Bark消息分为 {total_batches} 批次发送 [{report_type}]")
@@ -4482,15 +4482,14 @@ def send_to_slack(
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
 
-    # 获取分批内容（使用 Slack 批次大小），预留批次头部空间
-    slack_batch_size = CONFIG["SLACK_BATCH_SIZE"]
-    header_reserve = _get_max_batch_header_size("slack")
-    batches = split_content_into_batches(
-        report_data, "slack", update_info, max_bytes=slack_batch_size - header_reserve, mode=mode
+    # 使用增强的消息生成器
+    batches = generate_enhanced_message_content(
+        report_data,
+        "slack",
+        report_type,
+        update_info_to_send,
+        mode
     )
-
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "slack", slack_batch_size)
 
     print(f"Slack消息分为 {len(batches)} 批次发送 [{report_type}]")
 
