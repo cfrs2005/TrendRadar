@@ -18,6 +18,13 @@ from typing import Dict, List, Tuple, Optional, Union
 import pytz
 import requests
 import yaml
+import hashlib
+
+# Import BigModel AI service
+try:
+    from bigmodel_service import BigModelService
+except ImportError:
+    BigModelService = None
 
 
 VERSION = "3.4.1"
@@ -387,6 +394,7 @@ class PushRecordManager:
         retention_days = CONFIG["PUSH_WINDOW"]["RECORD_RETENTION_DAYS"]
         current_time = get_beijing_time()
 
+        # 清理推送状态记录
         for record_file in self.record_dir.glob("push_record_*.json"):
             try:
                 date_str = record_file.stem.replace("push_record_", "")
@@ -398,6 +406,40 @@ class PushRecordManager:
                     print(f"清理过期推送记录: {record_file.name}")
             except Exception as e:
                 print(f"清理记录文件失败 {record_file}: {e}")
+
+        # 清理推送新闻历史记录
+        history_file = self.get_pushed_news_file()
+        if history_file.exists():
+            try:
+                history = self.load_pushed_news_history()
+                current_date = current_time.strftime("%Y-%m-%d")
+
+                # 清理超过保留天数的历史记录
+                cleaned_history = {}
+                removed_count = 0
+
+                for date_str, news_data in history.items():
+                    try:
+                        record_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        record_date = pytz.timezone("Asia/Shanghai").localize(record_date)
+
+                        if (current_time - record_date).days <= retention_days:
+                            cleaned_history[date_str] = news_data
+                        else:
+                            removed_count += len(news_data)
+                            print(f"清理 {date_str} 的 {len(news_data)} 条推送新闻历史")
+                    except Exception as e:
+                        print(f"处理日期 {date_str} 时出错: {e}")
+                        # 保留无法解析日期的数据
+                        cleaned_history[date_str] = news_data
+
+                # 如果有清理内容，重新保存
+                if removed_count > 0 or len(cleaned_history) != len(history):
+                    self.save_pushed_news_history(cleaned_history)
+                    print(f"✅ 推送历史清理完成: 删除 {removed_count} 条历史记录")
+
+            except Exception as e:
+                print(f"清理推送新闻历史失败: {e}")
 
     def has_pushed_today(self) -> bool:
         """检查今天是否已经推送过"""
@@ -460,11 +502,108 @@ class PushRecordManager:
         normalized_current = normalize_time(current_time)
     
         result = normalized_start <= normalized_current <= normalized_end
-    
+
         if not result:
             print(f"时间窗口判断：当前 {normalized_current}，窗口 {normalized_start}-{normalized_end}")
-    
+
         return result
+
+    def get_pushed_news_file(self) -> Path:
+        """获取推送新闻历史记录文件路径"""
+        return self.record_dir / "pushed_news_history.json"
+
+    def load_pushed_news_history(self) -> Dict[str, Dict]:
+        """加载推送过的新闻历史"""
+        history_file = self.get_pushed_news_file()
+
+        if not history_file.exists():
+            return {}
+
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"加载推送新闻历史失败: {e}")
+            return {}
+
+    def save_pushed_news_history(self, history: Dict[str, Dict]):
+        """保存推送过的新闻历史"""
+        history_file = self.get_pushed_news_file()
+
+        try:
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存推送新闻历史失败: {e}")
+
+    def add_pushed_news(self, news_items: List[Dict]):
+        """添加推送过的新闻到历史记录"""
+        history = self.load_pushed_news_history()
+        current_date = get_beijing_time().strftime("%Y-%m-%d")
+
+        if current_date not in history:
+            history[current_date] = {}
+
+        for news_item in news_items:
+            # 使用新闻标题+平台作为唯一标识
+            news_key = self.generate_news_key(news_item)
+            history[current_date][news_key] = {
+                "title": news_item.get("title", ""),
+                "platform": news_item.get("platform", ""),
+                "push_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
+                "rank": news_item.get("rank", 0),
+                "url": news_item.get("url", ""),
+                "mobile_url": news_item.get("mobile_url", "")
+            }
+
+        self.save_pushed_news_history(history)
+        print(f"已添加 {len(news_items)} 条新闻到推送历史")
+
+    def generate_news_key(self, news_item: Dict) -> str:
+        """生成新闻的唯一标识键"""
+        title = news_item.get("title", "")
+        platform = news_item.get("platform", "")
+        # 标准化标题：去除多余空格和特殊字符
+        normalized_title = str(title).strip().lower()
+        # 使用MD5哈希确保键长度合理且唯一
+        content = f"{normalized_title}#{platform}"
+        return hashlib.md5(content.encode('utf-8')).hexdigest()[:16]
+
+    def is_news_pushed_today(self, news_item: Dict) -> bool:
+        """检查新闻今天是否已经推送过"""
+        current_date = get_beijing_time().strftime("%Y-%m-%d")
+        history = self.load_pushed_news_history()
+
+        if current_date not in history:
+            return False
+
+        news_key = self.generate_news_key(news_item)
+        return news_key in history[current_date]
+
+    def filter_new_news(self, all_news: Dict) -> Dict:
+        """过滤出今天未推送过的新新闻"""
+        new_news = {}
+
+        for platform_id, platform_news in all_news.items():
+            filtered_news = {}
+
+            for title, news_data in platform_news.items():
+                news_item = {
+                    "title": title,
+                    "platform": platform_id,
+                    "rank": news_data.get("ranks", [])[0] if news_data.get("ranks") else 0,
+                    "url": news_data.get("url", ""),
+                    "mobile_url": news_data.get("mobileUrl", "")
+                }
+
+                # 如果这条新闻今天没推送过，则加入新新闻列表
+                if not self.is_news_pushed_today(news_item):
+                    filtered_news[title] = news_data
+
+            if filtered_news:
+                new_news[platform_id] = filtered_news
+
+        return new_news
 
 
 # === 数据获取 ===
@@ -1109,17 +1248,21 @@ def count_word_frequency(
         filter_words = []  # 清空过滤词，显示所有新闻
 
     is_first_today = is_first_crawl_today()
+    push_manager = PushRecordManager()
 
     # 确定处理的数据源和新增标记逻辑
     if mode == "incremental":
-        if is_first_today:
-            # 增量模式 + 当天第一次：处理所有新闻，都标记为新增
-            results_to_process = results
-            all_news_are_new = True
-        else:
-            # 增量模式 + 当天非第一次：只处理新增的新闻
-            results_to_process = new_titles if new_titles else {}
-            all_news_are_new = True
+        # 增量模式：使用推送历史过滤未推送的新闻
+        print("🔍 增量模式：检查今天未推送的新闻...")
+        results_to_process = push_manager.filter_new_news(results)
+        all_news_are_new = True
+
+        # 统计过滤结果
+        original_count = sum(len(titles) for titles in results.values())
+        filtered_count = sum(len(titles) for titles in results_to_process.values())
+        removed_count = original_count - filtered_count
+
+        print(f"📊 增量过滤结果: 原始 {original_count} 条 → 新增 {filtered_count} 条 (去除 {removed_count} 条已推送)")
     elif mode == "current":
         # current 模式：只处理当前时间批次的新闻，但统计信息来自全部历史
         if title_info:
@@ -1422,6 +1565,25 @@ def count_word_frequency(
         # 先按热点条数，再按配置位置（原逻辑）
         stats.sort(key=lambda x: (-x["count"], x["position"]))
 
+    # 增量模式：记录本次要推送的新闻到历史
+    if mode == "incremental" and stats:
+        # 收集所有将要推送的新闻
+        pushed_news_items = []
+        for stat in stats:
+            for title_info in stat["titles"]:
+                pushed_news_items.append({
+                    "title": title_info["title"],
+                    "platform": title_info["source_name"],
+                    "rank": min(title_info["ranks"]) if title_info["ranks"] else 0,
+                    "url": title_info["url"],
+                    "mobile_url": title_info["mobileUrl"]
+                })
+
+        # 记录到推送历史
+        if pushed_news_items:
+            push_manager.add_pushed_news(pushed_news_items)
+            print(f"✅ 已记录 {len(pushed_news_items)} 条新闻到推送历史")
+
     return stats, total_titles
 
 
@@ -1444,7 +1606,18 @@ def prepare_report_data(
         filtered_new_titles = {}
         if new_titles and id_to_name:
             word_groups, filter_words = load_frequency_words()
-            for source_id, titles_data in new_titles.items():
+
+            # 应用内容增强到新标题
+            try:
+                from news_enhancer import NewsEnhancer
+                enhancer = NewsEnhancer()
+                enhanced_new_titles, _ = enhancer.enhance_news_data(new_titles)
+                print("📋 新增新闻标题已应用内容增强")
+            except ImportError:
+                enhanced_new_titles = new_titles
+                print("⚠️  内容增强模块不可用，使用原始新增新闻标题")
+
+            for source_id, titles_data in enhanced_new_titles.items():
                 filtered_titles = {}
                 for title, title_data in titles_data.items():
                     if matches_word_groups(title, word_groups, filter_words):
@@ -1513,6 +1686,69 @@ def prepare_report_data(
             }
         )
 
+    # AI 智能增强处理
+    ai_analysis_result = {}
+    all_titles_for_ai = []
+
+    # 收集所有标题用于 AI 分析
+    for stat in processed_stats:
+        all_titles_for_ai.extend(stat["titles"])
+
+    for source in processed_new_titles:
+        all_titles_for_ai.extend(source["titles"])
+
+    # 应用 AI 智能去重和分析
+    if BigModelService and all_titles_for_ai:
+        try:
+            ai_service = BigModelService()
+            ai_deduplicated_titles, ai_analysis_result = ai_service.smart_deduplicate_and_analyze(all_titles_for_ai)
+
+            # 更新统计数据中的标题列表
+            if ai_deduplicated_titles != all_titles_for_ai:
+                # 如果有去重，重新组织数据结构
+                print(f"🤖 AI智能去重: {len(all_titles_for_ai)}条 → {len(ai_deduplicated_titles)}条")
+
+                # 清空原有的标题列表，用AI去重后的替换
+                for stat in processed_stats:
+                    stat["titles"] = []
+
+                for source in processed_new_titles:
+                    source["titles"] = []
+
+                # 重新分配去重后的标题到对应的分类
+                for title_data in ai_deduplicated_titles:
+                    # 寻找匹配的分类词
+                    matched_stat = None
+                    for stat in processed_stats:
+                        if stat["word"].lower() in title_data.get("title", "").lower():
+                            matched_stat = stat
+                            break
+
+                    if matched_stat is None and processed_stats:
+                        matched_stat = processed_stats[0]  # 默认分配到第一个分类
+
+                    if matched_stat:
+                        matched_stat["titles"].append(title_data)
+
+                    # 如果是新增标题，分配到对应的来源
+                    if title_data.get("is_new", False):
+                        source_name = title_data.get("source_name", "")
+                        matched_source = None
+                        for source in processed_new_titles:
+                            if source["source_name"] == source_name:
+                                matched_source = source
+                                break
+
+                        if matched_source is None and processed_new_titles:
+                            matched_source = processed_new_titles[0]  # 默认分配到第一个来源
+
+                        if matched_source:
+                            matched_source["titles"].append(title_data)
+
+        except Exception as e:
+            print(f"⚠️  AI 智能分析失败，降级到传统模式: {str(e)}")
+            ai_analysis_result = {}
+
     return {
         "stats": processed_stats,
         "new_titles": processed_new_titles,
@@ -1520,6 +1756,7 @@ def prepare_report_data(
         "total_new_count": sum(
             len(source["titles"]) for source in processed_new_titles
         ),
+        "ai_analysis": ai_analysis_result,  # 添加 AI 分析结果
     }
 
 
@@ -3142,6 +3379,52 @@ def split_content_into_batches(
             current_batch = base_header + stats_header
             current_batch_has_content = True
 
+        # 添加 AI 智能分析（如果存在）
+        ai_analysis = report_data.get("ai_analysis", {})
+        if ai_analysis and BigModelService:
+            try:
+                ai_service = BigModelService()
+                # 收集所有标题用于 AI 消息格式化
+                all_titles_for_ai = []
+                for stat in report_data["stats"]:
+                    all_titles_for_ai.extend(stat["titles"])
+
+                ai_message = ai_service.format_ai_enhanced_message(all_titles_for_ai, ai_analysis)
+                if ai_message:
+                    # AI 分析消息格式化
+                    ai_header = ""
+                    if format_type in ("wework", "bark"):
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "telegram":
+                        ai_header = f"🤖 AI 智能分析\n\n"
+                    elif format_type == "ntfy":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "feishu":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "dingtalk":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "slack":
+                        ai_header = f"🤖 *AI 智能分析*\n\n"
+
+                    ai_content = ai_header + ai_message + "\n\n"
+
+                    # 检查是否超出限制
+                    test_content = current_batch + ai_content
+                    if (
+                        len(test_content.encode("utf-8")) + len(base_footer.encode("utf-8"))
+                        < max_bytes
+                    ):
+                        current_batch = test_content
+                    else:
+                        # 如果当前批次放不下 AI 分析，新建批次
+                        if current_batch_has_content:
+                            batches.append(current_batch + base_footer)
+                        current_batch = base_header + ai_content
+                        current_batch_has_content = True
+
+            except Exception as e:
+                print(f"⚠️  AI 消息格式化失败: {str(e)}")
+
         # 逐个处理词组（确保词组标题+第一条新闻的原子性）
         for i, stat in enumerate(report_data["stats"]):
             word = stat["word"]
@@ -4335,7 +4618,7 @@ def send_to_bark(
     proxy_url: Optional[str] = None,
     mode: str = "daily",
 ) -> bool:
-    """发送到Bark（支持分批发送，使用 markdown 格式）"""
+    """发送到Bark（支持分批发送，使用增强的 markdown 格式和去重功能）"""
     proxies = None
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
@@ -4354,24 +4637,54 @@ def send_to_bark(
     # 构建正确的 API 端点
     api_endpoint = f"{parsed_url.scheme}://{parsed_url.netloc}/push"
 
-    # 获取分批内容（Bark 限制为 3600 字节以避免 413 错误），预留批次头部空间
-    bark_batch_size = CONFIG["BARK_BATCH_SIZE"]
-    header_reserve = _get_max_batch_header_size("bark")
-    batches = split_content_into_batches(
-        report_data, "bark", update_info, max_bytes=bark_batch_size - header_reserve, mode=mode
-    )
+    # 使用增强的格式化器（包含去重和优化格式）
+    try:
+        from enhanced_bark_formatter import EnhancedBarkFormatter
+        formatter = EnhancedBarkFormatter(enable_duplicate_detection=True)
 
-    # 统一添加批次头部（已预留空间，不会超限）
-    batches = add_batch_headers(batches, "bark", bark_batch_size)
+        print("🤖 启用Bark增强功能：智能去重 + 优化格式")
+        now = datetime.now()
+        batches = formatter.format_enhanced_message(report_data, now, update_info)
+
+        # 输出去重统计信息
+        duplicate_stats = formatter.get_duplicate_stats()
+        if duplicate_stats and duplicate_stats["total_duplicates"] > 0:
+            print(f"🎯 智能去重完成: 处理 {duplicate_stats['total_processed']} 条，"
+                  f"去除 {duplicate_stats['total_duplicates']} 条重复，"
+                  f"保留 {duplicate_stats['unique_content']} 条")
+
+            # 输出平台去重详情
+            if duplicate_stats["platform_duplicates"]:
+                platform_details = []
+                for platform, count in duplicate_stats["platform_duplicates"].items():
+                    platform_details.append(f"{platform}({count})")
+                print(f"📱 平台重复: {'/'.join(platform_details)}")
+
+            if duplicate_stats["cross_platform_duplicates"] > 0:
+                print(f"🔄 跨平台重复: {duplicate_stats['cross_platform_duplicates']} 条")
+
+            print(f"🔍 检测方式: 哈希匹配 {duplicate_stats['hash_based_duplicates']} 条，"
+                  f"相似度匹配 {duplicate_stats['similarity_based_duplicates']} 条")
+
+    except ImportError:
+        print("⚠️ 增强格式化器不可用，使用传统格式")
+        # 回退到传统格式
+        bark_batch_size = CONFIG["BARK_BATCH_SIZE"]
+        header_reserve = _get_max_batch_header_size("bark")
+        batches = split_content_into_batches(
+            report_data, "bark", update_info, max_bytes=bark_batch_size - header_reserve, mode=mode
+        )
+        # 统一添加批次头部（已预留空间，不会超限）
+        batches = add_batch_headers(batches, "bark", bark_batch_size)
 
     total_batches = len(batches)
-    print(f"Bark消息分为 {total_batches} 批次发送 [{report_type}]")
+    print(f"📦 Bark消息分为 {total_batches} 批次发送 [{report_type}]")
 
     # 反转批次顺序，使得在Bark客户端显示时顺序正确
     # Bark显示最新消息在上面，所以我们从最后一批开始推送
     reversed_batches = list(reversed(batches))
 
-    print(f"Bark将按反向顺序推送（最后批次先推送），确保客户端显示顺序正确")
+    print(f"📱 Bark将按反向顺序推送（最后批次先推送），确保客户端显示顺序正确")
 
     # 逐批发送（反向顺序）
     success_count = 0
@@ -4736,11 +5049,22 @@ class NewsAnalyzer:
         failed_ids: Optional[List] = None,
         is_daily_summary: bool = False,
     ) -> Tuple[List[Dict], str]:
-        """统一的分析流水线：数据处理 → 统计计算 → HTML生成"""
+        """统一的分析流水线：内容增强 → 统计计算 → HTML生成"""
+
+        # 内容增强：翻译 Hacker News 标题并去重
+        try:
+            from news_enhancer import NewsEnhancer
+            enhancer = NewsEnhancer()
+            enhanced_data_source, removed_items = enhancer.enhance_news_data(data_source, title_info)
+            print("📋 数据源已应用内容增强")
+        except ImportError:
+            print("⚠️  内容增强模块不可用，使用原始数据")
+            enhanced_data_source = data_source
+            removed_items = {}
 
         # 统计计算
         stats, total_titles = count_word_frequency(
-            data_source,
+            enhanced_data_source,
             word_groups,
             filter_words,
             id_to_name,
