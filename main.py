@@ -1444,7 +1444,17 @@ def prepare_report_data(
         filtered_new_titles = {}
         if new_titles and id_to_name:
             word_groups, filter_words = load_frequency_words()
-            for source_id, titles_data in new_titles.items():
+            
+            # 应用内容增强到新标题
+            try:
+                from news_enhancer import enhance_news_data
+                enhanced_new_titles, _ = enhance_news_data(new_titles)
+                print("📋 新增新闻标题已应用内容增强")
+            except ImportError:
+                enhanced_new_titles = new_titles
+                print("⚠️  内容增强模块不可用，使用原始新增新闻标题")
+            
+            for source_id, titles_data in enhanced_new_titles.items():
                 filtered_titles = {}
                 for title, title_data in titles_data.items():
                     if matches_word_groups(title, word_groups, filter_words):
@@ -4736,11 +4746,20 @@ class NewsAnalyzer:
         failed_ids: Optional[List] = None,
         is_daily_summary: bool = False,
     ) -> Tuple[List[Dict], str]:
-        """统一的分析流水线：数据处理 → 统计计算 → HTML生成"""
+        """统一的分析流水线：内容增强 → 统计计算 → HTML生成"""
+        
+        # 内容增强：翻译 Hacker News 标题并去重
+        try:
+            from news_enhancer import enhance_news_data
+            enhanced_data_source, removed_items = enhance_news_data(data_source, title_info)
+        except ImportError:
+            print("⚠️  内容增强模块不可用，使用原始数据")
+            enhanced_data_source = data_source
+            removed_items = {}
 
         # 统计计算
         stats, total_titles = count_word_frequency(
-            data_source,
+            enhanced_data_source,
             word_groups,
             filter_words,
             id_to_name,
