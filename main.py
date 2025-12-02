@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import pytz
 import requests
 import yaml
+import hashlib
 
 
 VERSION = "3.4.1"
@@ -387,6 +388,7 @@ class PushRecordManager:
         retention_days = CONFIG["PUSH_WINDOW"]["RECORD_RETENTION_DAYS"]
         current_time = get_beijing_time()
 
+        # 清理推送状态记录
         for record_file in self.record_dir.glob("push_record_*.json"):
             try:
                 date_str = record_file.stem.replace("push_record_", "")
@@ -398,6 +400,40 @@ class PushRecordManager:
                     print(f"清理过期推送记录: {record_file.name}")
             except Exception as e:
                 print(f"清理记录文件失败 {record_file}: {e}")
+
+        # 清理推送新闻历史记录
+        history_file = self.get_pushed_news_file()
+        if history_file.exists():
+            try:
+                history = self.load_pushed_news_history()
+                current_date = current_time.strftime("%Y-%m-%d")
+                
+                # 清理超过保留天数的历史记录
+                cleaned_history = {}
+                removed_count = 0
+                
+                for date_str, news_data in history.items():
+                    try:
+                        record_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        record_date = pytz.timezone("Asia/Shanghai").localize(record_date)
+                        
+                        if (current_time - record_date).days <= retention_days:
+                            cleaned_history[date_str] = news_data
+                        else:
+                            removed_count += len(news_data)
+                            print(f"清理 {date_str} 的 {len(news_data)} 条推送新闻历史")
+                    except Exception as e:
+                        print(f"处理日期 {date_str} 时出错: {e}")
+                        # 保留无法解析日期的数据
+                        cleaned_history[date_str] = news_data
+                
+                # 如果有清理内容，重新保存
+                if removed_count > 0 or len(cleaned_history) != len(history):
+                    self.save_pushed_news_history(cleaned_history)
+                    print(f"✅ 推送历史清理完成: 删除 {removed_count} 条历史记录")
+                    
+            except Exception as e:
+                print(f"清理推送新闻历史失败: {e}")
 
     def has_pushed_today(self) -> bool:
         """检查今天是否已经推送过"""
@@ -431,6 +467,103 @@ class PushRecordManager:
             print(f"推送记录已保存: {report_type} at {now.strftime('%H:%M:%S')}")
         except Exception as e:
             print(f"保存推送记录失败: {e}")
+
+    def get_pushed_news_file(self) -> Path:
+        """获取推送新闻历史记录文件路径"""
+        return self.record_dir / "pushed_news_history.json"
+
+    def load_pushed_news_history(self) -> Dict[str, Dict]:
+        """加载推送过的新闻历史"""
+        history_file = self.get_pushed_news_file()
+        
+        if not history_file.exists():
+            return {}
+        
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"加载推送新闻历史失败: {e}")
+            return {}
+
+    def save_pushed_news_history(self, history: Dict[str, Dict]):
+        """保存推送过的新闻历史"""
+        history_file = self.get_pushed_news_file()
+        
+        try:
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存推送新闻历史失败: {e}")
+
+    def add_pushed_news(self, news_items: List[Dict]):
+        """添加推送过的新闻到历史记录"""
+        history = self.load_pushed_news_history()
+        current_date = get_beijing_time().strftime("%Y-%m-%d")
+        
+        if current_date not in history:
+            history[current_date] = {}
+        
+        for news_item in news_items:
+            # 使用新闻标题+平台作为唯一标识
+            news_key = self.generate_news_key(news_item)
+            history[current_date][news_key] = {
+                "title": news_item.get("title", ""),
+                "platform": news_item.get("platform", ""),
+                "push_time": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
+                "rank": news_item.get("rank", 0),
+                "url": news_item.get("url", ""),
+                "mobile_url": news_item.get("mobile_url", "")
+            }
+        
+        self.save_pushed_news_history(history)
+        print(f"已添加 {len(news_items)} 条新闻到推送历史")
+
+    def generate_news_key(self, news_item: Dict) -> str:
+        """生成新闻的唯一标识键"""
+        title = news_item.get("title", "")
+        platform = news_item.get("platform", "")
+        # 标准化标题：去除多余空格和特殊字符
+        normalized_title = str(title).strip().lower()
+        # 使用MD5哈希确保键长度合理且唯一
+        content = f"{normalized_title}#{platform}"
+        return hashlib.md5(content.encode('utf-8')).hexdigest()[:16]
+
+    def is_news_pushed_today(self, news_item: Dict) -> bool:
+        """检查新闻今天是否已经推送过"""
+        current_date = get_beijing_time().strftime("%Y-%m-%d")
+        history = self.load_pushed_news_history()
+        
+        if current_date not in history:
+            return False
+        
+        news_key = self.generate_news_key(news_item)
+        return news_key in history[current_date]
+
+    def filter_new_news(self, all_news: Dict) -> Dict:
+        """过滤出今天未推送过的新新闻"""
+        new_news = {}
+        
+        for platform_id, platform_news in all_news.items():
+            filtered_news = {}
+            
+            for title, news_data in platform_news.items():
+                news_item = {
+                    "title": title,
+                    "platform": platform_id,
+                    "rank": news_data.get("ranks", [])[0] if news_data.get("ranks") else 0,
+                    "url": news_data.get("url", ""),
+                    "mobile_url": news_data.get("mobileUrl", "")
+                }
+                
+                # 如果这条新闻今天没推送过，则加入新新闻列表
+                if not self.is_news_pushed_today(news_item):
+                    filtered_news[title] = news_data
+            
+            if filtered_news:
+                new_news[platform_id] = filtered_news
+        
+        return new_news
 
     def is_in_time_range(self, start_time: str, end_time: str) -> bool:
         """检查当前时间是否在指定时间范围内"""
@@ -1109,17 +1242,21 @@ def count_word_frequency(
         filter_words = []  # 清空过滤词，显示所有新闻
 
     is_first_today = is_first_crawl_today()
+    push_manager = PushRecordManager()
 
     # 确定处理的数据源和新增标记逻辑
     if mode == "incremental":
-        if is_first_today:
-            # 增量模式 + 当天第一次：处理所有新闻，都标记为新增
-            results_to_process = results
-            all_news_are_new = True
-        else:
-            # 增量模式 + 当天非第一次：只处理新增的新闻
-            results_to_process = new_titles if new_titles else {}
-            all_news_are_new = True
+        # 增量模式：使用推送历史过滤未推送的新闻
+        print("🔍 增量模式：检查今天未推送的新闻...")
+        results_to_process = push_manager.filter_new_news(results)
+        all_news_are_new = True
+        
+        # 统计过滤结果
+        original_count = sum(len(titles) for titles in results.values())
+        filtered_count = sum(len(titles) for titles in results_to_process.values())
+        removed_count = original_count - filtered_count
+        
+        print(f"📊 增量过滤结果: 原始 {original_count} 条 → 新增 {filtered_count} 条 (去除 {removed_count} 条已推送)")
     elif mode == "current":
         # current 模式：只处理当前时间批次的新闻，但统计信息来自全部历史
         if title_info:
@@ -1421,6 +1558,25 @@ def count_word_frequency(
     else:
         # 先按热点条数，再按配置位置（原逻辑）
         stats.sort(key=lambda x: (-x["count"], x["position"]))
+
+    # 增量模式：记录本次要推送的新闻到历史
+    if mode == "incremental" and stats:
+        # 收集所有将要推送的新闻
+        pushed_news_items = []
+        for stat in stats:
+            for title_info in stat["titles"]:
+                pushed_news_items.append({
+                    "title": title_info["title"],
+                    "platform": title_info["source_name"],
+                    "rank": min(title_info["ranks"]) if title_info["ranks"] else 0,
+                    "url": title_info["url"],
+                    "mobile_url": title_info["mobileUrl"]
+                })
+        
+        # 记录到推送历史
+        if pushed_news_items:
+            push_manager.add_pushed_news(pushed_news_items)
+            print(f"✅ 已记录 {len(pushed_news_items)} 条新闻到推送历史")
 
     return stats, total_titles
 
