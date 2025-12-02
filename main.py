@@ -19,6 +19,12 @@ import pytz
 import requests
 import yaml
 
+# Import BigModel AI service
+try:
+    from bigmodel_service import BigModelService
+except ImportError:
+    BigModelService = None
+
 
 VERSION = "3.4.1"
 
@@ -1513,6 +1519,69 @@ def prepare_report_data(
             }
         )
 
+    # AI 智能增强处理
+    ai_analysis_result = {}
+    all_titles_for_ai = []
+    
+    # 收集所有标题用于 AI 分析
+    for stat in processed_stats:
+        all_titles_for_ai.extend(stat["titles"])
+    
+    for source in processed_new_titles:
+        all_titles_for_ai.extend(source["titles"])
+    
+    # 应用 AI 智能去重和分析
+    if BigModelService and all_titles_for_ai:
+        try:
+            ai_service = BigModelService()
+            ai_deduplicated_titles, ai_analysis_result = ai_service.smart_deduplicate_and_analyze(all_titles_for_ai)
+            
+            # 更新统计数据中的标题列表
+            if ai_deduplicated_titles != all_titles_for_ai:
+                # 如果有去重，重新组织数据结构
+                print(f"🤖 AI智能去重: {len(all_titles_for_ai)}条 → {len(ai_deduplicated_titles)}条")
+                
+                # 清空原有的标题列表，用AI去重后的替换
+                for stat in processed_stats:
+                    stat["titles"] = []
+                
+                for source in processed_new_titles:
+                    source["titles"] = []
+                
+                # 重新分配去重后的标题到对应的分类
+                for title_data in ai_deduplicated_titles:
+                    # 寻找匹配的分类词
+                    matched_stat = None
+                    for stat in processed_stats:
+                        if stat["word"].lower() in title_data.get("title", "").lower():
+                            matched_stat = stat
+                            break
+                    
+                    if matched_stat is None and processed_stats:
+                        matched_stat = processed_stats[0]  # 默认分配到第一个分类
+                    
+                    if matched_stat:
+                        matched_stat["titles"].append(title_data)
+                    
+                    # 如果是新增标题，分配到对应的来源
+                    if title_data.get("is_new", False):
+                        source_name = title_data.get("source_name", "")
+                        matched_source = None
+                        for source in processed_new_titles:
+                            if source["source_name"] == source_name:
+                                matched_source = source
+                                break
+                        
+                        if matched_source is None and processed_new_titles:
+                            matched_source = processed_new_titles[0]  # 默认分配到第一个来源
+                        
+                        if matched_source:
+                            matched_source["titles"].append(title_data)
+                
+        except Exception as e:
+            print(f"⚠️  AI 智能分析失败，降级到传统模式: {str(e)}")
+            ai_analysis_result = {}
+
     return {
         "stats": processed_stats,
         "new_titles": processed_new_titles,
@@ -1520,6 +1589,7 @@ def prepare_report_data(
         "total_new_count": sum(
             len(source["titles"]) for source in processed_new_titles
         ),
+        "ai_analysis": ai_analysis_result,  # 添加 AI 分析结果
     }
 
 
@@ -3141,6 +3211,52 @@ def split_content_into_batches(
                 batches.append(current_batch + base_footer)
             current_batch = base_header + stats_header
             current_batch_has_content = True
+
+        # 添加 AI 智能分析（如果存在）
+        ai_analysis = report_data.get("ai_analysis", {})
+        if ai_analysis and BigModelService:
+            try:
+                ai_service = BigModelService()
+                # 收集所有标题用于 AI 消息格式化
+                all_titles_for_ai = []
+                for stat in report_data["stats"]:
+                    all_titles_for_ai.extend(stat["titles"])
+                
+                ai_message = ai_service.format_ai_enhanced_message(all_titles_for_ai, ai_analysis)
+                if ai_message:
+                    # AI 分析消息格式化
+                    ai_header = ""
+                    if format_type in ("wework", "bark"):
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "telegram":
+                        ai_header = f"🤖 AI 智能分析\n\n"
+                    elif format_type == "ntfy":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "feishu":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "dingtalk":
+                        ai_header = f"🤖 **AI 智能分析**\n\n"
+                    elif format_type == "slack":
+                        ai_header = f"🤖 *AI 智能分析*\n\n"
+                    
+                    ai_content = ai_header + ai_message + "\n\n"
+                    
+                    # 检查是否超出限制
+                    test_content = current_batch + ai_content
+                    if (
+                        len(test_content.encode("utf-8")) + len(base_footer.encode("utf-8"))
+                        < max_bytes
+                    ):
+                        current_batch = test_content
+                    else:
+                        # 如果当前批次放不下 AI 分析，新建批次
+                        if current_batch_has_content:
+                            batches.append(current_batch + base_footer)
+                        current_batch = base_header + ai_content
+                        current_batch_has_content = True
+                        
+            except Exception as e:
+                print(f"⚠️  AI 消息格式化失败: {str(e)}")
 
         # 逐个处理词组（确保词组标题+第一条新闻的原子性）
         for i, stat in enumerate(report_data["stats"]):
