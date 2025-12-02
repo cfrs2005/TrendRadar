@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import pytz
 import requests
 import yaml
+from push_history import PushHistory
 
 
 VERSION = "3.4.1"
@@ -4579,6 +4580,9 @@ class NewsAnalyzer:
         self.proxy_url = None
         self._setup_proxy()
         self.data_fetcher = DataFetcher(self.proxy_url)
+        
+        # 初始化推送历史记录管理器
+        self.push_history = PushHistory()
 
         if self.is_github_actions:
             self._check_version_update()
@@ -4689,7 +4693,13 @@ class NewsAnalyzer:
             total_titles = sum(len(titles) for titles in all_results.values())
             print(f"读取到 {total_titles} 个标题（已按当前监控平台过滤）")
 
-            new_titles = detect_latest_new_titles(current_platform_ids)
+            if self.report_mode == "incremental":
+                # 增量模式：使用推送历史记录获取真正的新增内容
+                new_titles = self.push_history.get_new_items(all_results)
+                print(f"🆕 增量模式检测到 {sum(len(titles) for titles in new_titles.values())} 条新内容")
+            else:
+                # daily和current模式：使用原有逻辑
+                new_titles = detect_latest_new_titles(current_platform_ids)
             word_groups, filter_words = load_frequency_words()
 
             return (
@@ -4782,7 +4792,8 @@ class NewsAnalyzer:
             and has_notification
             and self._has_valid_content(stats, new_titles)
         ):
-            send_to_notifications(
+            # 发送通知并获取结果
+            results = send_to_notifications(
                 stats,
                 failed_ids or [],
                 report_type,
@@ -4793,6 +4804,13 @@ class NewsAnalyzer:
                 mode=mode,
                 html_file_path=html_file_path,
             )
+            
+            # 如果是增量模式且有新增内容，标记为已推送
+            if (self.report_mode == "incremental" and new_titles and 
+                any(results.values())):  # 至少有一个平台发送成功
+                self.push_history.mark_items_as_pushed(new_titles)
+                print(f"✅ 已标记 {sum(len(titles) for titles in new_titles.values())} 条内容为已推送")
+            
             return True
         elif CONFIG["ENABLE_NOTIFICATION"] and not has_notification:
             print("⚠️ 警告：通知功能已启用但未配置任何通知渠道，将跳过通知发送")
@@ -4939,7 +4957,13 @@ class NewsAnalyzer:
         # 获取当前监控平台ID列表
         current_platform_ids = [platform["id"] for platform in CONFIG["PLATFORMS"]]
 
-        new_titles = detect_latest_new_titles(current_platform_ids)
+        if self.report_mode == "incremental":
+            # 增量模式：使用推送历史记录获取真正的新增内容
+            new_titles = self.push_history.get_new_items(results)
+            print(f"🆕 增量模式检测到 {sum(len(titles) for titles in new_titles.values())} 条新内容")
+        else:
+            # daily和current模式：使用原有逻辑
+            new_titles = detect_latest_new_titles(current_platform_ids)
         time_info = Path(save_titles_to_file(results, id_to_name, failed_ids)).stem
         word_groups, filter_words = load_frequency_words()
 
