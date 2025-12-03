@@ -170,20 +170,17 @@ class EnhancedBarkFormatter:
             
             news_parts.append("")
             news_parts.append(f"### 📱 {source_name} ({len(titles)} 条)")
-            
-            # 构建该平台的表格
             news_parts.append("")
-            news_parts.append("| 序号 | 新闻标题 | 热度 | 时间范围 |")
-            news_parts.append("|------|----------|------|----------|")
             
             for i, title_data in enumerate(titles[:15], 1):  # 限制每个平台最多15条
                 title = title_data.get("title", "")
+                url = title_data.get("url", "")
+                mobile_url = title_data.get("mobile_url", "")
                 ranks = title_data.get("ranks", [])
-                first_time = title_data.get("first_time", "")
-                last_time = title_data.get("last_time", "")
                 
-                # 截断过长的标题
-                title = title[:40] + "..." if len(title) > 40 else title
+                # 优先使用 mobile_url，其次 url
+                link_url = mobile_url if mobile_url else url
+                
                 if not title:
                     title = "标题获取失败"
                 
@@ -191,25 +188,19 @@ class EnhancedBarkFormatter:
                 heat_info = ""
                 if ranks:
                     try:
-                        heat_info = f"#{min(ranks)}"
+                        heat_info = f" 🔥#{min(ranks)}"
                     except (ValueError, TypeError):
-                        heat_info = "N/A"
-                else:
-                    heat_info = "N/A"
+                        pass
                 
-                # 处理时间信息
-                time_range = ""
-                if first_time and last_time and first_time != last_time:
-                    time_range = f"{first_time} ~ {last_time}"
-                elif first_time:
-                    time_range = first_time
+                # 构建带超链接的标题
+                if link_url:
+                    # Markdown 超链接格式
+                    news_parts.append(f"{i}. [{title}]({link_url}){heat_info}")
                 else:
-                    time_range = "未知时间"
-                
-                news_parts.append(f"| {i} | {title} | {heat_info} | {time_range} |")
+                    news_parts.append(f"{i}. {title}{heat_info}")
             
             if len(titles) > 15:
-                news_parts.append(f"| ... | **还有 {len(titles) - 15} 条** | ... | ... |")
+                news_parts.append(f"...还有 {len(titles) - 15} 条")
         
         return "\n".join(news_parts)
     

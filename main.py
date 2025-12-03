@@ -4643,7 +4643,7 @@ def send_to_bark(
         formatter = EnhancedBarkFormatter(enable_duplicate_detection=True)
 
         print("🤖 启用Bark增强功能：智能去重 + 优化格式")
-        now = datetime.now()
+        now = get_beijing_time()  # 使用东8区北京时间
         batches = formatter.format_enhanced_message(report_data, now, update_info)
 
         # 输出去重统计信息
