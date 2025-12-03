@@ -8,6 +8,9 @@ Agent
 语音识别
 机器视觉
 Prompt
+科技
+技术
+数字
 
 ChatGPT
 OpenAI

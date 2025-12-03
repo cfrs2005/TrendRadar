@@ -5055,7 +5055,10 @@ class NewsAnalyzer:
         try:
             from news_enhancer import NewsEnhancer
             enhancer = NewsEnhancer()
-            enhanced_data_source, removed_items = enhancer.enhance_news_data(data_source, title_info)
+            # 如果是生成汇总报告，不应该与历史数据去重（因为 data_source 本身就包含历史数据）
+            # 否则会导致所有数据都被当成重复数据删除
+            dedup_history = None if is_daily_summary else title_info
+            enhanced_data_source, removed_items = enhancer.enhance_news_data(data_source, dedup_history)
             print("📋 数据源已应用内容增强")
         except ImportError:
             print("⚠️  内容增强模块不可用，使用原始数据")
