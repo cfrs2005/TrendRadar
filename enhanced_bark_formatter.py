@@ -88,16 +88,22 @@ class EnhancedBarkFormatter:
             content_parts.append(duplicate_summary)
             content_parts.append("---\n")
         
-        # 添加热点词汇统计表格
+        # 添加热点词汇统计（简化版，只显示前5个）
         if report_data.get("stats"):
-            stats_table = self._format_stats_table(report_data["stats"])
-            content_parts.append(stats_table)
-            content_parts.append("")
+            stats_summary = self._format_stats_summary(report_data["stats"])
+            if stats_summary:
+                content_parts.append(stats_summary)
+                content_parts.append("")
         
-        # 添加新增热点新闻
+        # 优先显示新增热点新闻
         if report_data.get("new_titles"):
             news_section = self._format_news_section(report_data["new_titles"])
             content_parts.append(news_section)
+        # 如果没有新增新闻，从 stats 提取新闻显示
+        elif report_data.get("stats"):
+            news_from_stats = self._format_news_from_stats(report_data["stats"])
+            if news_from_stats:
+                content_parts.append(news_from_stats)
         
         # 添加失败平台信息
         if report_data.get("failed_ids"):
