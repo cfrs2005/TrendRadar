@@ -135,30 +135,66 @@ class EnhancedBarkFormatter:
         
         return "\n".join(header_parts)
     
-    def _format_stats_table(self, stats: List[Dict[str, Any]]) -> str:
-        """格式化统计表格"""
+    def _format_stats_summary(self, stats: List[Dict[str, Any]]) -> str:
+        """格式化统计摘要（简化版）"""
         if not stats:
             return ""
         
-        # 构建Markdown表格
-        table_parts = [
-            "## 📊 热点词汇统计",
-            "",
-            "| 排名 | 热点词汇 | 出现次数 | 平台分布 |",
-            "|------|----------|----------|----------|"
-        ]
+        summary_parts = ["## 📊 热点词汇 TOP 5"]
         
-        for i, stat in enumerate(stats[:10], 1):  # 限制显示前10个
+        for i, stat in enumerate(stats[:5], 1):
             word = stat.get("word", "")
             count = stat.get("count", 0)
-            platforms = " ".join(stat.get("platforms", []))
-            
-            # 截断过长的内容
-            platforms = platforms[:20] + "..." if len(platforms) > 20 else platforms
-            
-            table_parts.append(f"| {i} | **{word}** | {count} | {platforms} |")
+            summary_parts.append(f"{i}. **{word}** ({count}条)")
         
-        return "\n".join(table_parts)
+        return "\n".join(summary_parts)
+    
+    def _format_news_from_stats(self, stats: List[Dict[str, Any]]) -> str:
+        """从 stats 提取并格式化新闻"""
+        if not stats:
+            return ""
+        
+        news_parts = ["## 🔥 匹配关键词的新闻"]
+        
+        # 按关键词分组显示新闻
+        for stat in stats[:3]:  # 只显示前3个热点词
+            word = stat.get("word", "")
+            titles = stat.get("titles", [])
+            
+            if not titles:
+                continue
+            
+            news_parts.append("")
+            news_parts.append(f"### 🏷️ {word} ({len(titles)} 条)")
+            news_parts.append("")
+            
+            for i, title_data in enumerate(titles[:10], 1):  # 每个词最多10条
+                title = title_data.get("title", "")
+                url = title_data.get("url", "")
+                mobile_url = title_data.get("mobile_url", "")
+                source_name = title_data.get("source_name", "")
+                ranks = title_data.get("ranks", [])
+                
+                link_url = mobile_url if mobile_url else url
+                
+                if not title:
+                    continue
+                
+                # 热度信息
+                heat_info = ""
+                if ranks:
+                    try:
+                        heat_info = f" 🔥#{min(ranks)}"
+                    except (ValueError, TypeError):
+                        pass
+                
+                # 构建新闻条目
+                if link_url:
+                    news_parts.append(f"{i}. [{title}]({link_url}){heat_info} - {source_name}")
+                else:
+                    news_parts.append(f"{i}. {title}{heat_info} - {source_name}")
+        
+        return "\n".join(news_parts)
     
     def _format_news_section(self, new_titles: List[Dict[str, Any]]) -> str:
         """格式化新闻板块"""
